@@ -38,6 +38,7 @@ targets: [
 |---|---|
 | `ZeroByte` | Keys, envelopes, the relay client, `Link`, signal and ICE |
 | `ZeroBytePush` | APNs registrations for the relay's APNs module, and the tag in a push |
+| `ZeroByteTimeline` | One keyed state both devices keep, synced as commits that merge into one timeline |
 
 ## Usage
 
@@ -125,6 +126,41 @@ for await event in await channel.events() {
 }
 let ice = try await relay.iceServers()  // STUN/TURN for the peer connection
 ```
+
+### Timeline
+
+`ZeroByteTimeline` keeps one keyed state on both devices and sends only what
+changed, as commits that every device merges into the same order
+([Timeline v1](https://github.com/zerobyte-cloud/zerobyte-protocol/blob/master/timeline-v1.md)).
+A key's entry is the one with the latest stamp, so both copies converge
+whatever order things arrive in, and a change made after seeing another
+always wins over it.
+
+```swift
+import ZeroByteTimeline
+
+var timeline = (try? Timeline(encoded: saved)) ?? Timeline()
+
+// Setting a key to the value it already holds stages nothing.
+try timeline.set(planData, at: TimelineSlot("plan", plan.id.uuidString))
+
+let outcome = try await TimelineRelay.sync(
+    &timeline, credentials: credentials, transport: relay,
+    sends: .companionToPrimary, notify: .silent
+) { save($0.encoded()) }
+
+for update in outcome.updates {
+    apply(update.slot, update.value)  // nil: deleted
+}
+```
+
+- A device that can produce its own values again (from a database, say) creates
+  its timeline with `keepsOwnValues: false` and passes `values:` to `sync`; the
+  timeline then keeps only their digests.
+- Two devices on the same network can skip the relay: send
+  `timeline.state()`, answer the other's state with
+  `timeline.catchUp(after:)` and `receive` each part.
+- A value must fit in one message (1 MiB); split larger values over keys.
 
 ## Testing
 
