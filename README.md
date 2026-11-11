@@ -23,13 +23,15 @@ In `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/zerobyte-cloud/zerobyte-swift-sdk.git", from: "1.0.0")
+    .package(url: "https://github.com/zerobyte-cloud/zerobyte-swift-sdk.git", from: "1.2.0")
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
         .product(name: "ZeroByte", package: "zerobyte-swift-sdk"),
         // Only if the app uses Apple push notifications:
         .product(name: "ZeroBytePush", package: "zerobyte-swift-sdk"),
+        // Only if the app keeps a timeline:
+        .product(name: "ZeroByteTimeline", package: "zerobyte-swift-sdk"),
     ])
 ]
 ```
@@ -154,12 +156,27 @@ for update in outcome.updates {
 }
 ```
 
+- `sync` writes nothing when it has nothing new to send: a read that changed
+  nothing is not acknowledged, and a catch-up request with nothing to catch
+  up on gets no answer.
+- A long catch-up, for a device that is new or lost its copy, goes out over
+  several runs of about 8 MiB each (`TimelineRelay.catchUpBudget`, or
+  `commitBudget:`); the timeline saves its place. `commitBudget:` also caps
+  how much one run commits, and `hasPendingChange(at:)` says whether a key's
+  change is still waiting.
+- `outcome.waiting` counts messages kept for the next run because the mailbox
+  was full; `outcome.isPeerCurrent` says whether the other device has every
+  commit of this one.
 - A device that can produce its own values again (from a database, say) creates
   its timeline with `forgetsOwnValues:` naming those collections and passes
-  `values:` to `sync`; the timeline then keeps only their digests.
+  `values:` to `sync`; the timeline then keeps only their digests. `values:`
+  must return the value as committed: a catch-up leaves out a key whose value
+  has changed since, until the change is set and committed.
 - Two devices on the same network can skip the relay: send
   `timeline.state()`, answer the other's state with
-  `timeline.catchUp(after:)` and `receive` each part.
+  `timeline.catchUp(after:)` and `receive` each part. Pass commits made there
+  with `commit(now:)` to `TimelineRelay.enqueue(_:in:)` as well: the relay
+  carries them unless the other device confirms them first.
 - A value must fit in one message (1 MiB); split larger values over keys.
 
 ## Testing
@@ -168,7 +185,8 @@ for update in outcome.updates {
 swift test
 ```
 
-This runs the protocol vectors and the `Link` tests. To also test against a
+This runs the protocol and timeline vectors, the `Link` tests and two
+timelines syncing through a relay in memory. To also test against a
 real relay, start one locally (see zerobyte-relay) and run:
 
 ```sh
@@ -178,9 +196,11 @@ RELAY_BASE=http://127.0.0.1:8080/v1/ RELAY_APP=<app id> swift test
 For the extensions, add an app with `signal` (and `push=<bundle id>`) to the
 relay and set `RELAY_SIGNAL_APP=<that id>` (and `RELAY_PUSH=1`).
 
-`Tests/ZeroByteTests/relay-v1.json` is copied from the independent reference in
+`Tests/ZeroByteTests/relay-v1.json` and
+`Tests/ZeroByteTimelineTests/timeline.json` are copied from the independent
+reference in
 [zerobyte-protocol](https://github.com/zerobyte-cloud/zerobyte-protocol/tree/master/spec).
-Never regenerate it from this package.
+Never regenerate them from this package.
 
 ## Licence
 
