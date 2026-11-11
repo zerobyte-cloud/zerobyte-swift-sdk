@@ -130,6 +130,21 @@ struct TimelineRelayTests {
         #expect(phone.timeline.entry(TimelineSlot("day", "20261110"))?.digest != nil)
     }
 
+    @Test func quietOnceBothAreCurrent() async throws {
+        let (phone, mac, _) = try Self.pair()
+        try phone.set("hrv 45", "day", "1")
+        try mac.set("tempo", "plan", "p")
+        for _ in 0..<3 {
+            try await phone.sync()
+            try await mac.sync()
+        }
+        let phoneRun = try await phone.sync()
+        let macRun = try await mac.sync()
+        #expect(phoneRun.written == 0 && macRun.written == 0)
+        #expect(phoneRun.isPeerCurrent && macRun.isPeerCurrent)
+        #expect(mac.text("day", "1") == "hrv 45" && phone.text("plan", "p") == "tempo")
+    }
+
     @Test func onlyChangesTravel() async throws {
         let (phone, mac, _) = try Self.pair()
         for day in 1...30 { try phone.set("day \(day)", "day", String(day)) }

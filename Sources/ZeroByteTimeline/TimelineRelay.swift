@@ -57,9 +57,9 @@ public enum TimelineRelay {
 
         // 1. Read and merge.
         let started = timeline.relay.readThrough
+        let headsBefore = timeline.heads
         var fetched = started
         var after = started
-        var receivedCatchUp = false
         while true {
             let page = try await transport.fetch(direction: reads, after: fetched)
             let before = fetched
@@ -83,7 +83,6 @@ public enum TimelineRelay {
                 } catch {
                     continue
                 }
-                if case .catchUp = message { receivedCatchUp = true }
                 let receipt = try timeline.receive(message)
                 outcome.updates += receipt.updates
                 outcome.merged += receipt.merged
@@ -131,14 +130,28 @@ public enum TimelineRelay {
         {
             let next = timeline.continueCatchUp(
                 &cursor, maximumBytes: commitBudget ?? catchUpBudget, values: values)
-            for part in next.parts {
-                timeline.relay.outbox.append(
-                    TimelineOutboxItem(kind: .catchUp, message: part.encoded()))
+            // Nothing the requester lacks: no answer at all.
+            let isEmpty =
+                next.parts.count == 1
+                && {
+                    guard case .catchUp(_, let heads, let entries) = next.parts[0] else {
+                        return false
+                    }
+                    return entries.isEmpty
+                        && heads.allSatisfy { replica, head in
+                            (cursor.requesterHeads[replica]?.sequence ?? 0) >= head.sequence
+                        }
+                }()
+            if !(next.isFinished && isEmpty) {
+                for part in next.parts {
+                    timeline.relay.outbox.append(
+                        TimelineOutboxItem(kind: .catchUp, message: part.encoded()))
+                }
             }
             timeline.relay.catchUp = next.isFinished ? nil : cursor
             queued = true
         }
-        let merged = outcome.merged > 0 || receivedCatchUp
+        let merged = outcome.merged > 0 || !outcome.updates.isEmpty || timeline.heads != headsBefore
         if !timeline.relay.ownRequest.isEmpty || (merged && commits.isEmpty) {
             var request = timeline.relay.ownRequest
             timeline.relay.outbox.removeAll { item in
