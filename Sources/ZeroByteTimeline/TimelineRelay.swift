@@ -36,7 +36,7 @@ public enum TimelineRelay {
     ///     changes this run; the rest wait for the next.
     ///   - notify: Asked of the relay with the run's last envelope.
     ///   - values: Produces own values the timeline does not keep, for a
-    ///     catch-up (`Timeline.keepsOwnValues`).
+    ///     catch-up (`Timeline.forgetsOwnValues`).
     ///   - persist: Saves the timeline. Called after reading, before the
     ///     relay is pruned, and after writing.
     public static func sync(

@@ -155,8 +155,8 @@ for update in outcome.updates {
 ```
 
 - A device that can produce its own values again (from a database, say) creates
-  its timeline with `keepsOwnValues: false` and passes `values:` to `sync`; the
-  timeline then keeps only their digests.
+  its timeline with `forgetsOwnValues:` naming those collections and passes
+  `values:` to `sync`; the timeline then keeps only their digests.
 - Two devices on the same network can skip the relay: send
   `timeline.state()`, answer the other's state with
   `timeline.catchUp(after:)` and `receive` each part.

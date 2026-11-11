@@ -66,7 +66,7 @@ final class Device {
     var source: [TimelineSlot: Data] = [:]
 
     init(sends: Direction, credentials: Credentials, relay: TimelineMemoryRelay, keepsOwn: Bool) {
-        timeline = Timeline(keepsOwnValues: keepsOwn)
+        timeline = Timeline(forgetsOwnValues: keepsOwn ? [] : ["day", "stream", "workout"])
         saved = timeline.encoded()
         self.sends = sends
         self.credentials = credentials
@@ -287,7 +287,7 @@ struct TimelineRelayTests {
     }
 
     @Test func aDirectExchangeNeedsNoRelay() throws {
-        var phone = Timeline(keepsOwnValues: true)
+        var phone = Timeline()
         var mac = Timeline()
         try phone.set(Data("hrv".utf8), at: TimelineSlot("day", "1"))
         try mac.set(Data("tempo".utf8), at: TimelineSlot("plan", "p"))

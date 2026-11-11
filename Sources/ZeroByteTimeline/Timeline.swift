@@ -101,9 +101,10 @@ public struct Timeline: Sendable {
     public private(set) var heads: [ReplicaID: TimelineHead] = [:]
     /// The greatest clock written or merged.
     public private(set) var last: UInt64 = 0
-    /// False keeps only the digests of this replica's own values: for an app
-    /// that can produce them again, so the state does not hold a second copy.
-    public let keepsOwnValues: Bool
+    /// Collections whose own values this replica keeps only as digests: for
+    /// an app that can produce them again (`TimelineRelay.sync(values:)`), so
+    /// the state does not hold a second copy of its database.
+    public let forgetsOwnValues: Set<String>
     public let maximumMessageBytes: Int
     public var relay = TimelineRelayCursor()
 
@@ -122,11 +123,11 @@ public struct Timeline: Sendable {
     }
 
     public init(
-        replica: ReplicaID = .random(), keepsOwnValues: Bool = true,
+        replica: ReplicaID = .random(), forgetsOwnValues: Set<String> = [],
         maximumMessageBytes: Int = TimelineLimits.maximumMessageBytes
     ) {
         self.replica = replica
-        self.keepsOwnValues = keepsOwnValues
+        self.forgetsOwnValues = forgetsOwnValues
         self.maximumMessageBytes = min(maximumMessageBytes, TimelineLimits.maximumMessageBytes)
     }
 
@@ -192,6 +193,9 @@ public struct Timeline: Sendable {
 
     public var hasPendingChanges: Bool { !pending.isEmpty }
     public var pendingCount: Int { pending.count }
+
+    /// Whether a change at this key waits to be committed.
+    public func hasPendingChange(at slot: TimelineSlot) -> Bool { pending[slot] != nil }
 
     public var pendingBytes: Int {
         pending.reduce(0) { total, item in
@@ -339,7 +343,7 @@ public struct Timeline: Sendable {
     ) -> TimelineUpdate? {
         if let current = entries[slot], current.stamp >= stamp { return nil }
         let digest = value.map { Data(SHA256.hash(data: $0)) }
-        let keeps = stamp.replica != replica || keepsOwnValues
+        let keeps = stamp.replica != replica || !forgetsOwnValues.contains(slot.collection)
         entries[slot] = Stored(stamp: stamp, digest: digest, value: keeps ? value : nil)
         if case .value(let staged)? = pending[slot], value == staged { pending[slot] = nil }
         return TimelineUpdate(slot: slot, value: value, stamp: stamp)
@@ -450,7 +454,12 @@ extension Timeline {
         writer.byte(1)
         writer.bytes(replica.bytes)
         writer.uint64(last)
-        writer.byte(keepsOwnValues ? 1 : 0)
+        writer.byte(UInt8(forgetsOwnValues.count))
+        for collection in forgetsOwnValues.sorted() {
+            let bytes = Array(collection.utf8)
+            writer.byte(UInt8(bytes.count))
+            writer.data.append(contentsOf: bytes)
+        }
         writer.uint32(UInt32(maximumMessageBytes))
         writer.heads(heads)
         writer.uint32(UInt32(entries.count))
@@ -518,9 +527,14 @@ extension Timeline {
             let replica = ReplicaID(bytes: try reader.take(16))
         else { throw TimelineError.malformed }
         let last = try reader.uint64()
-        let keeps = try reader.byte() == 1
+        var forgets: Set<String> = []
+        for _ in 0..<(try reader.byte()) {
+            guard let collection = String(bytes: try reader.take(Int(try reader.byte())), encoding: .utf8)
+            else { throw TimelineError.malformed }
+            forgets.insert(collection)
+        }
         self.init(
-            replica: replica, keepsOwnValues: keeps,
+            replica: replica, forgetsOwnValues: forgets,
             maximumMessageBytes: Int(try reader.uint32()))
         self.last = last
         heads = try reader.heads()
