@@ -190,6 +190,13 @@ public enum TimelineRelay {
         return outcome
     }
 
+    /// Queues commits made outside a relay run, on a direct channel for
+    /// example, so the relay still carries them if the other side did not
+    /// confirm them there (`Timeline.noteConfirmed` drops them once it does).
+    public static func enqueue(_ commits: [TimelineCommit], in timeline: inout Timeline) {
+        timeline.relay.outbox += pack(commits, limit: timeline.maximumMessageBytes)
+    }
+
     /// Commits in as few messages as fit, in order.
     static func pack(_ commits: [TimelineCommit], limit: Int) -> [TimelineOutboxItem] {
         var items: [TimelineOutboxItem] = []
