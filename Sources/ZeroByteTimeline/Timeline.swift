@@ -65,6 +65,15 @@ public struct TimelineOutboxItem: Hashable, Sendable {
     }
 }
 
+/// Where a catch-up written a few parts at a time has got to.
+public struct TimelineCatchUpCursor: Hashable, Sendable {
+    public let requesterHeads: [ReplicaID: TimelineHead]
+    public let includingOwn: Bool
+    public let finalHeads: [ReplicaID: TimelineHead]
+    /// The last key considered.
+    public var after: TimelineSlot?
+}
+
 /// What `TimelineRelay` remembers between runs.
 public struct TimelineRelayCursor: Hashable, Sendable {
     /// The last envelope read from the other direction.
@@ -81,6 +90,8 @@ public struct TimelineRelayCursor: Hashable, Sendable {
     public var peerRequestHeads: [ReplicaID: TimelineHead] = [:]
     /// A catch-up this side still has to ask for.
     public var ownRequest: TimelineRequest = .newReplica
+    /// A catch-up being written, when it did not fit one run.
+    public var catchUp: TimelineCatchUpCursor?
 
     public init() {}
 }
@@ -353,17 +364,46 @@ public struct Timeline: Sendable {
         after requesterHeads: [ReplicaID: TimelineHead], includingOwn: Bool = true,
         values: (TimelineSlot) -> Data? = { _ in nil }
     ) -> [TimelineMessage] {
+        var cursor = beginCatchUp(after: requesterHeads, includingOwn: includingOwn)
+        return continueCatchUp(&cursor, maximumBytes: .max, values: values).parts
+    }
+
+    /// Starts a catch-up to be written a few parts at a time. Its final part
+    /// carries the heads of now, so commits made while it is written are never
+    /// taken as covered by it.
+    public func beginCatchUp(
+        after requesterHeads: [ReplicaID: TimelineHead], includingOwn: Bool = true
+    ) -> TimelineCatchUpCursor {
         var finalHeads = heads
         if !includingOwn { finalHeads[replica] = nil }
+        return TimelineCatchUpCursor(
+            requesterHeads: requesterHeads, includingOwn: includingOwn, finalHeads: finalHeads)
+    }
+
+    /// The next parts of a catch-up, about `maximumBytes` of them; the call
+    /// that reaches the end adds the final part and reports it finished.
+    public func continueCatchUp(
+        _ cursor: inout TimelineCatchUpCursor, maximumBytes: Int,
+        values: (TimelineSlot) -> Data? = { _ in nil }
+    ) -> (parts: [TimelineMessage], isFinished: Bool) {
         let partOverhead = 8
         var parts: [TimelineMessage] = []
         var batch: [TimelineStampedEntry] = []
         var size = partOverhead
-        for slot in entries.keys.sorted() {
+        var produced = 0
+        let slots = entries.keys.filter { slot in cursor.after.map { $0 < slot } ?? true }.sorted()
+        for slot in slots {
+            if produced >= maximumBytes {
+                if !batch.isEmpty { parts.append(.catchUp(isFinal: false, heads: [:], entries: batch)) }
+                return (parts, false)
+            }
+            cursor.after = slot
             let stored = entries[slot]!
             let origin = stored.stamp.replica
-            if origin == replica, !includingOwn { continue }
-            if let seen = requesterHeads[origin]?.sequence, stored.stamp.sequence <= seen { continue }
+            if origin == replica, !cursor.includingOwn { continue }
+            if let seen = cursor.requesterHeads[origin]?.sequence, stored.stamp.sequence <= seen {
+                continue
+            }
             var value: Data?
             if stored.digest != nil {
                 guard let found = stored.value ?? values(slot),
@@ -379,14 +419,14 @@ public struct Timeline: Sendable {
             }
             batch.append(item)
             size += item.encodedLength
+            produced += item.encodedLength
         }
-        let headsBytes = finalHeads.count * 64
-        if !batch.isEmpty, size + headsBytes > maximumMessageBytes {
+        if !batch.isEmpty, size + cursor.finalHeads.count * 64 > maximumMessageBytes {
             parts.append(.catchUp(isFinal: false, heads: [:], entries: batch))
             batch = []
         }
-        parts.append(.catchUp(isFinal: true, heads: finalHeads, entries: batch))
-        return parts
+        parts.append(.catchUp(isFinal: true, heads: cursor.finalHeads, entries: batch))
+        return (parts, true)
     }
 
     /// Records that the other side has this replica's commits through
@@ -456,6 +496,19 @@ extension Timeline {
         writer.byte(relay.peerRequest.rawValue)
         writer.heads(relay.peerRequestHeads)
         writer.byte(relay.ownRequest.rawValue)
+        if let cursor = relay.catchUp {
+            writer.byte(cursor.includingOwn ? 3 : 1)
+            writer.heads(cursor.requesterHeads)
+            writer.heads(cursor.finalHeads)
+            if let after = cursor.after {
+                writer.byte(1)
+                writer.slot(after)
+            } else {
+                writer.byte(0)
+            }
+        } else {
+            writer.byte(0)
+        }
         return writer.data
     }
 
@@ -516,6 +569,15 @@ extension Timeline {
         relay.peerRequest = TimelineRequest(rawValue: try reader.byte())
         relay.peerRequestHeads = try reader.heads()
         relay.ownRequest = TimelineRequest(rawValue: try reader.byte())
+        let catchUp = try reader.byte()
+        if catchUp != 0 {
+            let requesterHeads = try reader.heads()
+            let finalHeads = try reader.heads()
+            let after = try reader.byte() == 1 ? try reader.slot() : nil
+            relay.catchUp = TimelineCatchUpCursor(
+                requesterHeads: requesterHeads, includingOwn: catchUp == 3, finalHeads: finalHeads,
+                after: after)
+        }
         guard reader.isAtEnd else { throw TimelineError.malformed }
     }
 }

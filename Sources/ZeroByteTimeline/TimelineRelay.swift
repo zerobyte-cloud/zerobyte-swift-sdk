@@ -27,6 +27,8 @@ public struct TimelineSyncOutcome: Sendable {
 }
 
 public enum TimelineRelay {
+    /// About how much of a catch-up one run writes when no budget is given.
+    public static let catchUpBudget = 8 * 1_048_576
     /// - Parameters:
     ///   - sends: The direction this replica writes: `.primaryToCompanion` on
     ///     the primary, `.companionToPrimary` on the companion.
@@ -117,12 +119,23 @@ public enum TimelineRelay {
             let theirs = heads[timeline.replica]?.sequence ?? 0
             // A gap, or a head that went back: the other side lost what was sent.
             let lost = request.contains(.gap) || theirs < timeline.relay.confirmed
-            for part in timeline.catchUp(after: heads, includingOwn: lost, values: values) {
+            // A newer request replaces a catch-up still being written.
+            timeline.relay.outbox.removeAll { $0.kind == .catchUp }
+            timeline.relay.catchUp = timeline.beginCatchUp(after: heads, includingOwn: lost)
+            timeline.relay.peerRequest = []
+            timeline.relay.peerRequestHeads = [:]
+            queued = true
+        }
+        if var cursor = timeline.relay.catchUp,
+            !timeline.relay.outbox.contains(where: { $0.kind == .catchUp })
+        {
+            let next = timeline.continueCatchUp(
+                &cursor, maximumBytes: commitBudget ?? catchUpBudget, values: values)
+            for part in next.parts {
                 timeline.relay.outbox.append(
                     TimelineOutboxItem(kind: .catchUp, message: part.encoded()))
             }
-            timeline.relay.peerRequest = []
-            timeline.relay.peerRequestHeads = [:]
+            timeline.relay.catchUp = next.isFinished ? nil : cursor
             queued = true
         }
         let merged = outcome.merged > 0 || receivedCatchUp

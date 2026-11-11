@@ -244,6 +244,33 @@ struct TimelineRelayTests {
         }
     }
 
+    @Test func aLongCatchUpSpansRuns() async throws {
+        let (phone, mac, relay) = try Self.pair(capacity: 3)
+        let value = String(repeating: "z", count: 250_000)
+        for index in 0..<10 { try phone.set(value + String(index), "stream", String(index)) }
+        for _ in 0..<12 {
+            try await phone.sync()
+            try await mac.sync()
+        }
+        #expect(mac.timeline.entries(in: "stream").count == 10)
+
+        let fresh = Device(
+            sends: .companionToPrimary, credentials: mac.credentials, relay: relay, keepsOwn: true)
+        fresh.timeline.relay.readThrough = mac.timeline.relay.readThrough
+        try await fresh.sync()
+        var runs = 0
+        while runs < 12 {
+            let outcome = try await phone.sync(budget: 600_000)
+            try await fresh.sync()
+            runs += 1
+            if outcome.waiting == 0, phone.timeline.relay.catchUp == nil { break }
+        }
+        #expect(runs > 1)
+        try await fresh.sync()
+        for index in 0..<10 { #expect(fresh.text("stream", String(index)) == value + String(index)) }
+        #expect(fresh.timeline.heads[phone.timeline.replica] == phone.timeline.heads[phone.timeline.replica])
+    }
+
     @Test func aDirectExchangeNeedsNoRelay() throws {
         var phone = Timeline(keepsOwnValues: true)
         var mac = Timeline()
